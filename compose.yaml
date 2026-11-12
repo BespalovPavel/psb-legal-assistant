@@ -1,9 +1,52 @@
 services:
-  legal-assistant:
+  db:
+    image: postgres:16-alpine
+    container_name: psb_assistant_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-psb_assistant}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-psb_assistant}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  web:
     build: .
+    container_name: psb_assistant_api
+    # network_mode: "host"
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
-      - DATA_DIR=data
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-psb_assistant}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_ECHO=${DB_ECHO:-false}
+      - DATA_DIR=${DATA_DIR:-data}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data:ro
+      - static_volume:/app/static
+
+volumes:
+  postgres_data:
+  static_volume:
