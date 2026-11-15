@@ -1,6 +1,8 @@
-# PSB Legal Assistant — Веб-контур и RAG-система
+# PSB Legal Assistant — Веб-контур, Frontend и RAG-система
 
-Юридический ИИ-ассистент с контролем достоверности нормативных документов, гибридным поиском (BM25 + Char-WB TF-IDF + Dense Embeddings + Reranker) и персистентным хранением контекста диалогов.
+Юридический ИИ-ассистент с контролем достоверности нормативных документов, гибридным поиском (BM25 + Char-WB TF-IDF + Dense Embeddings + Reranker), персистентным хранением контекста диалогов и веб-интерфейсом на **Next.js 15** (`frontend/`).
+
+> **Для бэкенд-разработчиков:** подробный контракт API, поведение BFF-прокси, правила UI и чек-лист проверок описаны в [docs/BACKEND_GUIDE.md](docs/BACKEND_GUIDE.md).
 
 ## База данных
 
@@ -16,15 +18,15 @@
 
 ## Запуск приложения
 
-### Путь A. Запуск через Docker (для жюри)
+### Путь A. Запуск через Docker (весь стек: PostgreSQL + Backend + Frontend)
 
-Запуск всего контура (PostgreSQL + FastAPI веб-сервис) выполняется одной командой:
+Запуск всего контура (PostgreSQL + FastAPI + Next.js) выполняется одной командой:
 
 ```bash
 docker compose up --build
 ```
 
-Сервис базы данных запустится на порту `5432`, применит healthcheck `pg_isready`, после чего запустится backend-сервис на порту `8000`, применит миграции Alembic и запустит uvicorn.
+Сервис базы данных запустится на порту `5432` (healthcheck `pg_isready`), затем поднимется `backend` на порту `8000` (применит миграции Alembic и запустит uvicorn), а после его healthcheck (`GET /api/documents`) запустится `frontend` на порту `3000`.
 
 ---
 
@@ -86,6 +88,18 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 При первом запуске при пустой таблице `documents` lifespan-обработчик автоматически выполнит первичный инджест базы знаний из каталога `data/knowledge-base`.
 
+#### 6. Запуск веб-интерфейса (`frontend/`)
+
+В отдельном терминале:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Веб-интерфейс откроется на `http://localhost:3000`. Все запросы браузера к `/api/*` проксируются через `frontend/app/api/[...path]/route.ts` на `PSB_API_URL` (по умолчанию `http://127.0.0.1:8000`).
+
 ---
 
 ## Переменные окружения (.env)
@@ -101,8 +115,11 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 | `LLM_MODEL` | Имя генеративной модели | `deepseek/deepseek-v4.1-flash` |
 | `EMB_MODEL` | Модель векторных представлений | `baai/bge-m3` |
 | `RERANKER_MODEL` | Модель кросс-энкодера реранкинга | `Qwen/Qwen3-Reranker-8B` |
+| `PSB_API_URL` | Базовый URL FastAPI для BFF-прокси `frontend/` | `http://127.0.0.1:8000` |
+| `PSB_PROXY_TIMEOUT_MS` | Таймаут BFF-прокси в мс | `200000` |
 
 Сетевые порты:
+- `3000`: Frontend (Next.js)
 - `8000`: FastAPI HTTP веб-сервис
 - `5432`: PostgreSQL
 
