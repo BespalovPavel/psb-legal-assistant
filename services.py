@@ -1,126 +1,135 @@
-import asyncio
+from __future__ import annotations
+
+import logging
 import uuid
-from typing import Annotated
+from typing import Any
 
-from fastapi import Depends, HTTPException, Request, status
+import httpx
+from sqlalchemy.orm import Session
 
-import controllers
-from repository import AssistantRepository
-from schemas import (
-    AuditLogDTO,
-    ChatMessageDTO,
-    ChatRequestDTO,
-    ChatResponseDTO,
-    DocumentSummaryDTO,
-    HealthResponseDTO,
-    SourceDocumentDTO,
+import config
+import history
+import llm_client
+import prompts
+import repository
+from retriever import HybridLegalRetriever
+
+logger = logging.getLogger(__name__)
+
+FALLBACK_ANSWER = (
+    "В предоставленной базе знаний нет документов, достаточных для достоверного ответа "
+    "по поставленному вопросу. По памяти отвечать не буду, так как нормы могли измениться. "
+    "Уточните вопрос или обратитесь к юристу."
 )
 
 
-def get_rag_controller(request: Request) -> controllers.LegalAssistantController:
-    """Достаёт инициализированный RAG-контроллер из app.state (без циклических импортов!)."""
-    return request.app.state.controller
+class LLMClient:
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        client: httpx.Client | None = None,
+    ) -> str:
+        if client is None:
+            with httpx.Client(timeout=90.0) as default_client:
+                return self._call(default_client, system_prompt, user_prompt)
+        return self._call(client, system_prompt, user_prompt)
+
+    def _call(
+        self,
+        client: httpx.Client,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> str:
+        payload = {
+            "model": config.LLM_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": config.TEMPERATURE,
+            "max_tokens": config.MAX_TOKENS,
+        }
+        res = llm_client.api_post(
+            client, "/chat/completions", config.LLM_KEY, payload, retries=2
+        )
+        choice = res.get("choices", [{}])[0]
+        content = choice.get("message", {}).get("content", "")
+        if not content:
+            return ""
+        return prompts.clean_model_output(content)
 
 
-ControllerDep = Annotated[controllers.LegalAssistantController, Depends(get_rag_controller)]
-RepoDep = Annotated[AssistantRepository, Depends()]
+def ask(
+    db: Session,
+    chat_id: str | uuid.UUID,
+    question: str,
+    client: httpx.Client,
+    llm: LLMClient | Any,
+    index: HybridLegalRetriever | Any,
+) -> dict:
+    chat_data = repository.get_chat(db, chat_id)
+    if chat_data is None:
+        raise ValueError(f"Чат {chat_id} не найден")
 
+    dialog_lines: list[str] = []
+    for m in chat_data.get("messages", []):
+        prefix = "Пользователь" if m["role"] == "user" else "Ассистент"
+        dialog_lines.append(f"{prefix}: {m['content'].strip()}")
+    dialog_lines.append(f"Пользователь: {question.strip()}")
+    dialog = "\n".join(dialog_lines)
 
-class AssistantService:
-    """Бизнес-логика приложения: объединяет память/журнал в БД (Repository) и RAG-ядро (Controller)."""
+    hist, last_user = history.parse_dialog(dialog)
+    search_query = history.build_search_query(hist, last_user)
 
-    def __init__(self, repository: RepoDep, controller: ControllerDep) -> None:
-        self.repository = repository
-        self.controller = controller
+    context, retrieved_sources = index.retrieve(client, search_query)
 
-    async def get_health(self) -> HealthResponseDTO:
-        db_ok = await self.repository.ping_db()
-        base_health = self.controller.get_health()
-        return HealthResponseDTO(
-            status="ok",
-            db_connected=db_ok,
-            documents_loaded=base_health.documents_loaded,
-            chunks_indexed=base_health.chunks_indexed,
-            llm_model=base_health.llm_model,
-            emb_model=base_health.emb_model,
-            reranker_model=base_health.reranker_model,
+    user_prompt = (
+        "ДОКУМЕНТЫ ИЗ БАЗЫ ЗНАНИЙ:\n"
+        + context
+        + "\n\n---\nВОПРОС (ИЛИ ДИАЛОГ) ПОЛЬЗОВАТЕЛЯ:\n"
+        + dialog
+        + "\n\nОтвет:"
+    )
+
+    try:
+        answer = llm.generate(prompts.SYSTEM_PROMPT, user_prompt, client=client)
+        if not answer or not answer.strip():
+            answer = FALLBACK_ANSWER
+    except Exception as exc:
+        logger.warning("Ошибка генерации ответа LLM: %s", exc)
+        answer = FALLBACK_ANSWER
+
+    user_msg_id = repository.add_message(db, chat_id, "user", question)
+    asst_msg_id = repository.add_message(
+        db, chat_id, "assistant", answer, search_query=search_query
+    )
+
+    formatted_sources = []
+    sources_to_save = []
+    for s in retrieved_sources:
+        doc_title = s.get("title") or s.get("doc_title")
+        src_item = {
+            "doc_id": s.get("doc_id"),
+            "chunk_id": s.get("chunk_id"),
+            "doc_title": doc_title,
+            "path": s.get("path"),
+            "snippet": s.get("snippet"),
+        }
+        formatted_sources.append(src_item)
+        sources_to_save.append(
+            {
+                "doc_id": s.get("doc_id"),
+                "chunk_id": s.get("chunk_id"),
+                "snippet": s.get("snippet"),
+            }
         )
 
-    async def list_documents(self) -> list[DocumentSummaryDTO]:
-        docs = self.controller.list_documents()
-        return [DocumentSummaryDTO(**d.model_dump()) for d in docs]
+    repository.add_message_sources(db, asst_msg_id, sources_to_save)
 
-    async def get_document(self, doc_id: str) -> SourceDocumentDTO:
-        doc = self.controller.get_document_by_id(doc_id)
-        if doc is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Документ '{doc_id}' не найден в базе знаний",
-            )
-        return SourceDocumentDTO(**doc.model_dump())
-
-    async def handle_chat(self, req: ChatRequestDTO) -> ChatResponseDTO:
-        session_id = req.session_id or str(uuid.uuid4())
-        last_user_msg = req.messages[-1].content
-
-        # 1. Если клиент прислал только 1 новое сообщение, но указал session_id —
-        # подтягиваем предыдущий контекст диалога из БД!
-        full_messages: list[ChatMessageDTO] = list(req.messages)
-        if req.session_id and len(req.messages) == 1:
-            db_history = await self.repository.get_chat_history(req.session_id)
-            if db_history:
-                full_messages = db_history + full_messages
-
-        # 2. Вызываем RAG-контроллер в отдельном потоке, чтобы не блокировать async event loop
-        enriched_req = ChatRequestDTO(session_id=session_id, messages=full_messages)
-        raw_res = await asyncio.to_thread(self.controller.process_interactive_chat, enriched_req)
-
-        # 3. Сохраняем шаг диалога и запись в журнал отладки (Audit Log) в БД
-        await self.repository.save_chat_turn(
-            session_id=session_id,
-            user_message=last_user_msg,
-            assistant_answer=raw_res.answer,
-        )
-        await self.repository.write_audit_log(
-            session_id=session_id,
-            user_query=last_user_msg,
-            assistant_answer=raw_res.answer,
-            grounding_status=raw_res.telemetry.grounding_status,
-            has_injection_attempt=raw_res.telemetry.has_injection_attempt,
-            has_expired_docs=raw_res.telemetry.has_expired_docs_in_context,
-            cited_clauses=raw_res.telemetry.cited_clauses,
-            source_filenames=[s.filename for s in raw_res.sources],
-            latency_ms=raw_res.telemetry.latency_ms,
-        )
-
-        return ChatResponseDTO(
-            session_id=session_id,
-            answer=raw_res.answer,
-            sources=[SourceDocumentDTO(**s.model_dump()) for s in raw_res.sources],
-            telemetry=raw_res.telemetry.model_dump(),
-        )
-
-    async def get_session_history(self, session_id: str) -> list[ChatMessageDTO]:
-        return await self.repository.get_chat_history(session_id)
-
-    async def get_audit_logs(self, limit: int = 50) -> list[AuditLogDTO]:
-        logs = await self.repository.get_recent_audit_logs(limit=limit)
-        return [
-            AuditLogDTO(
-                id=row.id,
-                session_id=row.session_id,
-                user_query=row.user_query,
-                assistant_answer=row.assistant_answer,
-                grounding_status=row.grounding_status,
-                has_injection_attempt=row.has_injection_attempt,
-                has_expired_docs=row.has_expired_docs,
-                cited_clauses=row.cited_clauses or [],
-                source_filenames=row.source_filenames or [],
-                latency_ms=row.latency_ms,
-                created_at=row.created_at,
-            )
-            for row in logs
-        ]
-
-
-ServiceDep = Annotated[AssistantService, Depends()]
+    return {
+        "user_message_id": user_msg_id,
+        "assistant_message_id": asst_msg_id,
+        "answer": answer,
+        "sources": formatted_sources,
+    }

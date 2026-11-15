@@ -1,79 +1,85 @@
-from datetime import datetime
+from __future__ import annotations
+
+from typing import Any
 from pydantic import BaseModel, Field
 
 
-class ChatMessageDTO(BaseModel):
-    role: str = Field(..., description="Роль: 'user' или 'assistant'")
-    content: str = Field(..., description="Текст сообщения")
+class CreateChatRequest(BaseModel):
+    title: str | None = None
 
 
-class ChatRequestDTO(BaseModel):
-    session_id: str | None = Field(
-        default=None,
-        description="ID сессии чата в БД (если передан, история автоматически подтянется из БД)",
-    )
-    messages: list[ChatMessageDTO] = Field(..., min_length=1, description="Сообщения диалога")
-
-
-class SourceDocumentDTO(BaseModel):
-    doc_id: str
-    filename: str
+class ChatCreatedResponse(BaseModel):
+    chat_id: str
     title: str
-    is_expired: bool
-    is_contract: bool
-    entities: list[str]
-    codes: list[str]
-    snippet: str
-    full_text: str
 
 
-class DocumentSummaryDTO(BaseModel):
-    doc_id: str
-    filename: str
+class ChatListItemResponse(BaseModel):
+    chat_id: str
     title: str
-    is_expired: bool
-    is_contract: bool
-    entities: list[str]
-    codes: list[str]
-    char_length: int
+    updated_at: str
+    last_message: str | None = None
 
 
-class TrustTelemetryDTO(BaseModel):
-    grounding_status: str
-    status_label: str
-    has_injection_attempt: bool
-    has_expired_docs_in_context: bool
-    counterparty_filter: list[str]
-    cited_clauses: list[str]
-    latency_ms: int
+class MessageSourceDetail(BaseModel):
+    doc_id: str | None = None
+    chunk_id: str | None = None
+    doc_title: str | None = None
+    path: str | None = None
+    snippet: str | None = None
 
 
-class ChatResponseDTO(BaseModel):
-    session_id: str | None = None
-    answer: str
-    sources: list[SourceDocumentDTO]
-    telemetry: TrustTelemetryDTO
-
-
-class AuditLogDTO(BaseModel):
+class ChatMessageDetail(BaseModel):
     id: int
-    session_id: str | None
-    user_query: str
-    assistant_answer: str
-    grounding_status: str
-    has_injection_attempt: bool
-    has_expired_docs: bool
-    cited_clauses: list[str]
-    source_filenames: list[str]
-    latency_ms: int
-    created_at: datetime
+    role: str
+    content: str
+    created_at: str
+    sources: list[MessageSourceDetail] = []
 
 
-class HealthResponseDTO(BaseModel):
-    status: str
-    db_connected: bool
-    documents_loaded: int
-    chunks_indexed: int
-    llm_model: str
-    emb_model: str
-    reranker_model: str
+class ChatDetailResponse(BaseModel):
+    chat_id: str
+    title: str
+    messages: list[ChatMessageDetail]
+
+
+class DeleteChatResponse(BaseModel):
+    status: str = "deleted"
+
+
+class SendMessageRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
+class SendMessageResponse(BaseModel):
+    user_message_id: int
+    assistant_message_id: int
+    answer: str
+    sources: list[MessageSourceDetail]
+
+
+class DocumentListItemResponse(BaseModel):
+    doc_id: str
+    title: str
+    doc_type: str | None = None
+    status: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
+    n_chunks: int = 0
+
+
+class ChunkSummaryDetail(BaseModel):
+    chunk_id: str
+    ord: int
+    path: str | None = None
+    text: str
+    is_heading: bool = False
+
+
+class DocumentDetailResponse(BaseModel):
+    document: dict[str, Any]
+    chunks: list[ChunkSummaryDetail]
+
+
+class ChunkWithDocResponse(BaseModel):
+    chunk: dict[str, Any]
+    document: dict[str, Any] | None = None

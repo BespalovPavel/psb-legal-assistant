@@ -1,50 +1,175 @@
-from fastapi import APIRouter
+from __future__ import annotations
 
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session
+
+from database import get_db
+import repository
 from schemas import (
-    AuditLogDTO,
-    ChatMessageDTO,
-    ChatRequestDTO,
-    ChatResponseDTO,
-    DocumentSummaryDTO,
-    HealthResponseDTO,
-    SourceDocumentDTO,
+    ChatCreatedResponse,
+    ChatDetailResponse,
+    ChatListItemResponse,
+    ChunkWithDocResponse,
+    CreateChatRequest,
+    DeleteChatResponse,
+    DocumentDetailResponse,
+    DocumentListItemResponse,
+    SendMessageRequest,
+    SendMessageResponse,
 )
-from services import ServiceDep
+import services
 
-router = APIRouter(prefix="", tags=["api"])
-
-
-@router.get("/api/health", response_model=HealthResponseDTO, tags=["System"])
-async def get_health(service: ServiceDep) -> HealthResponseDTO:
-    """Проверка статуса API, БД, индекса и подключённых моделей."""
-    return await service.get_health()
+router = APIRouter(prefix="/api", tags=["api"])
 
 
-@router.get("/api/documents", response_model=list[DocumentSummaryDTO], tags=["Knowledge Base"])
-async def list_documents(service: ServiceDep) -> list[DocumentSummaryDTO]:
-    """Возвращает список всех документов базы знаний с метаданными и статусом редакции."""
-    return await service.list_documents()
+@router.post(
+    "/chats",
+    response_model=ChatCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_chat(
+    req: CreateChatRequest | None = None,
+    db: Session = Depends(get_db),
+) -> ChatCreatedResponse:
+    title = req.title if req and req.title else None
+    chat_id = repository.create_chat(db, title=title)
+    chat = repository.get_chat(db, chat_id)
+    chat_title = chat["title"] if chat else (title or "Новый чат")
+    return ChatCreatedResponse(chat_id=chat_id, title=chat_title)
 
 
-@router.get("/api/documents/{doc_id}", response_model=SourceDocumentDTO, tags=["Knowledge Base"])
-async def get_document(doc_id: str, service: ServiceDep) -> SourceDocumentDTO:
-    """Возвращает полный текст и метаданные конкретного документа БЗ по его doc_id."""
-    return await service.get_document(doc_id)
+@router.get(
+    "/chats",
+    response_model=list[ChatListItemResponse],
+)
+def list_chats(
+    db: Session = Depends(get_db),
+) -> list[ChatListItemResponse]:
+    return [ChatListItemResponse(**c) for c in repository.list_chats(db)]
 
 
-@router.post("/api/chat", response_model=ChatResponseDTO, tags=["Assistant"])
-async def chat(req: ChatRequestDTO, service: ServiceDep) -> ChatResponseDTO:
-    """Основной эндпоинт чата: поиск в БЗ, генерация ответа, сохранение контекста и аудит-лога в БД."""
-    return await service.handle_chat(req)
+@router.get(
+    "/chats/{chat_id}",
+    response_model=ChatDetailResponse,
+)
+def get_chat(
+    chat_id: str,
+    db: Session = Depends(get_db),
+) -> ChatDetailResponse:
+    chat = repository.get_chat(db, chat_id)
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Чат '{chat_id}' не найден",
+        )
+    return ChatDetailResponse(**chat)
 
 
-@router.get("/api/sessions/{session_id}/messages", response_model=list[ChatMessageDTO], tags=["Memory & Audit"])
-async def get_session_messages(session_id: str, service: ServiceDep) -> list[ChatMessageDTO]:
-    """Возвращает историю сообщений диалога из БД по session_id."""
-    return await service.get_session_history(session_id)
+@router.delete(
+    "/chats/{chat_id}",
+    response_model=DeleteChatResponse,
+)
+def delete_chat(
+    chat_id: str,
+    db: Session = Depends(get_db),
+) -> DeleteChatResponse:
+    success = repository.delete_chat(db, chat_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Чат '{chat_id}' не найден",
+        )
+    return DeleteChatResponse(status="deleted")
 
 
-@router.get("/api/audit-logs", response_model=list[AuditLogDTO], tags=["Memory & Audit"])
-async def get_audit_logs(service: ServiceDep, limit: int = 50) -> list[AuditLogDTO]:
-    """Возвращает журнал отладки и контроля достоверности ответов ИИ из БД."""
-    return await service.get_audit_logs(limit=limit)
+@router.post(
+    "/chats/{chat_id}/messages",
+    response_model=SendMessageResponse,
+)
+def send_message(
+    chat_id: str,
+    req: SendMessageRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SendMessageResponse:
+    chat = repository.get_chat(db, chat_id)
+    if not chat:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Чат '{chat_id}' не найден",
+        )
+
+    client = getattr(request.app.state, "client", None)
+    llm = getattr(request.app.state, "llm", None)
+    index = getattr(request.app.state, "index", None)
+
+    if client is None or llm is None or index is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Сервис не инициализирован",
+        )
+
+    result = services.ask(
+        db=db,
+        chat_id=chat_id,
+        question=req.content,
+        client=client,
+        llm=llm,
+        index=index,
+    )
+    return SendMessageResponse(**result)
+
+
+@router.get(
+    "/documents",
+    response_model=list[DocumentListItemResponse],
+)
+def list_documents(
+    db: Session = Depends(get_db),
+) -> list[DocumentListItemResponse]:
+    return [DocumentListItemResponse(**d) for d in repository.list_documents(db)]
+
+
+@router.get(
+    "/documents/{doc_id}",
+    response_model=DocumentDetailResponse,
+)
+def get_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+) -> DocumentDetailResponse:
+    doc = repository.get_document(db, doc_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Документ '{doc_id}' не найден",
+        )
+    chunks = repository.get_document_chunks(db, doc_id)
+    chunk_items = [
+        {
+            "chunk_id": c["chunk_id"],
+            "ord": c["ord"],
+            "path": c["path"],
+            "text": c["text"],
+            "is_heading": c["is_heading"],
+        }
+        for c in chunks
+    ]
+    return DocumentDetailResponse(document=doc, chunks=chunk_items)
+
+
+@router.get(
+    "/chunks/{chunk_id}",
+    response_model=ChunkWithDocResponse,
+)
+def get_chunk(
+    chunk_id: str,
+    db: Session = Depends(get_db),
+) -> ChunkWithDocResponse:
+    res = repository.get_chunk(db, chunk_id)
+    if not res:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Чанк '{chunk_id}' не найден",
+        )
+    return ChunkWithDocResponse(**res)

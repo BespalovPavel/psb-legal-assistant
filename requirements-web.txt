@@ -1,0 +1,12 @@
+# Зависимости веб-контура. Корневой requirements.txt заморожен для ZIP-сабмита на платформу.
+fastapi==0.143.2
+uvicorn==0.54.0
+pydantic==2.14.2
+python-dotenv==1.1.1
+httpx==0.28.1
+numpy==2.2.6
+rank-bm25==0.2.2
+scikit-learn==1.9.1
+SQLAlchemy==2.0.44
+psycopg2-binary==2.9.10
+alembic==1.16.2

@@ -1,40 +1,19 @@
-# настройки под postgres, если надо будет 
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-
-from core.config import settings
-
-# "postgresql+asyncpg://postgres:postgres@localhost:5432/postgres"
-
-engine = create_async_engine(
-    settings.db_settings.db_url.render_as_string(hide_password=False),
-    echo=settings.db_settings.db_echo,
-    pool_pre_ping=True,       # проверяет живо ли соединение перед запросом
-    pool_size=10,             # Базовый размер пула соединений
-    max_overflow=20,          # Допустимый всплеск нагрузки
-    pool_recycle=300, 
-    )
-
-new_session = async_sessionmaker(
-    bind=engine, 
-    expire_on_commit=False,
-    # autoflush=False,
-    )
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://assistant:assistant@localhost:5432/legal_assistant")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+Base = declarative_base()
 
 
-async def get_session():
-    async with new_session() as sess:
-        try:
-            yield sess
-        except Exception:
-            await sess.rollback()
-            raise
-        finally:
-            await sess.close()
-
-# async def setup_db():
-#     async with engine.begin() as conn:
-#         await conn.run_sync(Base.metadata.create_all)
-
-
-    
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

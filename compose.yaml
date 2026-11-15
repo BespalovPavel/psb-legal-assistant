@@ -4,49 +4,33 @@ services:
     container_name: psb_assistant_db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${DB_NAME:-psb_assistant}
-      POSTGRES_USER: ${DB_USER:-postgres}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-legal_assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-psb_assistant}",
-        ]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-assistant} -d ${POSTGRES_DB:-legal_assistant}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  web:
+  backend:
     build: .
-    container_name: psb_assistant_api
-    # network_mode: "host"
+    container_name: psb_assistant_backend
     restart: unless-stopped
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     env_file:
       - path: .env
         required: false
     environment:
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${DB_NAME:-psb_assistant}
-      - DB_USER=${DB_USER:-postgres}
-      - DB_PASSWORD=${DB_PASSWORD:-postgres}
-      - DB_ECHO=${DB_ECHO:-false}
-      - DATA_DIR=${DATA_DIR:-data}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-assistant}:${POSTGRES_PASSWORD:-assistant}@db:5432/${POSTGRES_DB:-legal_assistant}
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - ./data:/app/data:ro
-      - static_volume:/app/static
 
 volumes:
-  postgres_data:
-  static_volume:
+  pgdata:

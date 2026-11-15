@@ -1,43 +1,54 @@
+from __future__ import annotations
+
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, status
-from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
+import uvicorn
 
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
-import controllers
-
+from database import Base, SessionLocal, engine
+import database_models  # noqa: F401 - registers models on Base.metadata
+import repository
+from retriever import HybridLegalRetriever
 from routers import router
+from services import LLMClient
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
-    app.state.controller = controllers.LegalAssistantController()
-    yield
-    
-    
-def create_app() -> FastAPI:
+async def lifespan(app: FastAPI):
+    # 1. Синхронное создание таблиц, если они не существуют
+    Base.metadata.create_all(engine, checkfirst=True)
 
+    # 2. Инджест базы знаний при пустой таблице документов
+    with SessionLocal() as db:
+        if repository.count_documents(db) == 0:
+            repository.ingest_knowledge_base(db, folder="data/knowledge-base")
+
+    # 3. HTTP-клиент с таймаутом 90 секунд
+    app.state.client = httpx.Client(timeout=90.0)
+
+    # 4. Инициализация индекса гибридного ретривера из БД
+    with SessionLocal() as db:
+        app.state.index = HybridLegalRetriever.from_db(db)
+
+    # 5. Инициализация клиента LLM
+    app.state.llm = LLMClient()
+
+    yield
+
+    # Shutdown: закрытие HTTP-клиента
+    if hasattr(app.state, "client") and app.state.client is not None:
+        app.state.client.close()
+
+
+def create_app() -> FastAPI:
     app = FastAPI(
-        title="ПСБ - Юридический ИИ-ассистент",
-        description="RAG-система с контролем достоверности нормативных документов",
-        version="1.0",
+        title="ПСБ Юридический ИИ-ассистент",
+        description="Веб-контур юридического ИИ-ассистента на базе PostgreSQL и RAG",
+        version="1.0.0",
         lifespan=lifespan,
-        
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json"
     )
-    
-    app.mount("/static", StaticFiles(directory="static"), name="static")
-    templates = Jinja2Templates(directory="templates")
-    
-    app.include_router(router)
-    
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -45,43 +56,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # Обработчики ошибок
-    @app.exception_handler(StarletteHTTPException)
-    async def general_http_exception_handler(request: Request, exception: StarletteHTTPException):
-        if request.url.path.startswith("/api"):
-            return await http_exception_handler(request, exception)
 
-        message = exception.detail or "An error occurred. Please check your request."
-        return templates.TemplateResponse(
-            request,
-            "error.html",
-            {"status_code": exception.status_code, "title": exception.status_code, "message": message},
-            status_code=exception.status_code,
-        )
+    app.include_router(router)
 
-
-    @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(request: Request, exception: RequestValidationError):
-        if request.url.path.startswith("/api"):
-            return await request_validation_exception_handler(request, exception)
-
-        return templates.TemplateResponse(
-            request,
-            "error.html",
-            {
-                "status_code": status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "title": status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "message": "Invalid request parameters.",
-            },
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        )
-        
     return app
 
-app = create_app()
-    
-"""
-zip -j submit.zip config.py models.py retriever.py llm_client.py views.py controllers.py solution.py requirements.txt
 
-"""
+app = create_app()
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
