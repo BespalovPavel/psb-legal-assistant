@@ -8,7 +8,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
-    text,
+    text as sa_text,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import relationship
@@ -22,12 +22,12 @@ class Chat(Base):
     id = Column(
         postgresql.UUID(as_uuid=True),
         primary_key=True,
-        server_default=text("gen_random_uuid()"),
+        server_default=sa_text("gen_random_uuid()"),
     )
     title = Column(
         String(200),
         nullable=False,
-        server_default=text("'Новый чат'"),
+        server_default=sa_text("'Новый чат'"),
     )
     created_at = Column(
         DateTime(timezone=True),
@@ -99,19 +99,19 @@ class Document(Base):
     parties = Column(
         postgresql.JSONB,
         nullable=False,
-        server_default=text("'[]'::jsonb"),
+        server_default=sa_text("'[]'::jsonb"),
     )
     extra = Column(
         postgresql.JSONB,
         nullable=False,
-        server_default=text("'{}'::jsonb"),
+        server_default=sa_text("'{}'::jsonb"),
     )
     raw_text = Column(Text, nullable=True)
     content_hash = Column(String(64), nullable=False, unique=True, index=True)
     n_chunks = Column(
         Integer,
         nullable=False,
-        server_default=text("0"),
+        server_default=sa_text("0"),
     )
     created_at = Column(
         DateTime(timezone=True),
@@ -146,7 +146,7 @@ class Chunk(Base):
     is_heading = Column(
         Boolean,
         nullable=False,
-        server_default=text("false"),
+        server_default=sa_text("false"),
     )
     status = Column(String(60), nullable=True)
     valid_from = Column(String(10), nullable=True)
@@ -189,7 +189,7 @@ class MessageSource(Base):
     position = Column(
         Integer,
         nullable=False,
-        server_default=text("0"),
+        server_default=sa_text("0"),
     )
 
     message = relationship("Message", back_populates="sources")
